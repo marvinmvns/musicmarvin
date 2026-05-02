@@ -1,14 +1,9 @@
-name = "music-proxy"
+name = "music-cache"
 main = "worker.mjs"
 compatibility_date = "2026-01-15"
 
-# nodejs_compat habilita Buffer / streams / TextEncoder usados pelos libs
-# WASM internamente. Sem isso o mpg123-decoder explode no boot.
-compatibility_flags = ["nodejs_compat"]
-
-# Plano Workers Paid ($5/mês) é necessário: o transcode usa ~8-12 s de CPU
-# por request, acima dos 10 ms do free tier.
-# usage_model = "bundled"  # default no Paid; sem-CPU-limit
+# Workers Free tier dá conta — só fazemos proxy + cache R2, sem decode.
+# CPU gasto por request é ~1 ms (busca + headers), bem dentro dos 10 ms.
 
 # R2 cache. Bucket precisa existir antes do deploy:
 #   npx wrangler r2 bucket create music-cache
@@ -16,8 +11,3 @@ compatibility_flags = ["nodejs_compat"]
 [[r2_buckets]]
 binding = "MUSIC"
 bucket_name = "music-cache"
-
-# Limites — sobe se vc tem músicas longas (preview Deezer é sempre 30 s,
-# então 50 s de CPU é folgado).
-# [limits]
-# cpu_ms = 50000

@@ -1,9 +1,9 @@
 {
-  "name": "music-proxy",
+  "name": "music-cache",
   "private": true,
   "type": "module",
-  "version": "1.0.0",
-  "description": "DoguIA music proxy: Deezer preview → MP3 mono 22050Hz 64kbps com cache R2",
+  "version": "1.1.0",
+  "description": "DoguIA music proxy: Deezer preview MP3 com cache R2 e truncamento opcional",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
@@ -11,10 +11,6 @@
     "r2:create": "wrangler r2 bucket create music-cache",
     "r2:list": "wrangler r2 object list music-cache",
     "r2:purge": "wrangler r2 bucket delete music-cache --force && npm run r2:create"
-  },
-  "dependencies": {
-    "@breezystack/lamejs": "^1.2.7",
-    "mpg123-decoder": "^1.0.3"
   },
   "devDependencies": {
     "wrangler": "^4.0.0"
