@@ -1,192 +1,137 @@
-# music-proxy (Cloudflare Worker)
+# music-cache (Cloudflare Worker)
 
 Proxy do Cloudflare Worker que serve preview de músicas do Deezer pro
-firmware DoguIA (zzpet-s3), reencodando para um formato leve que o
-ESP32-S3 consegue baixar e decodificar sem travar.
+firmware DoguIA (zzpet-s3), com cache em R2 e truncamento opcional.
 
-## Diferenças do worker antigo
+## Por que não tem transcodificação?
 
-| Item | Antes | Agora |
-|---|---|---|
-| Formato | MP3 stereo 44100 Hz 128 kbps | **MP3 mono 22050 Hz 64 kbps** |
-| Tamanho típico (30 s) | ~480 KB | **~240 KB** |
-| Janela TLS | ~20 s download | **~10 s download** |
-| Cache | só CF edge cache (varia) | **R2 cache permanente** (10 GB grátis) |
-| API | `?q=` `?max_kb=` | **idêntica** + header `X-Cache: HIT/MISS` |
+A intenção original era reencodar os MP3 do Deezer (128 kbps stereo
+44.1 kHz) pra mono 22050 Hz 64 kbps usando `mpg123-decoder` (WASM).
+Não funciona em CF Workers — o decoder depende de
+`@eshaz/web-worker` que referencia a API `Worker` do browser, e
+a runtime do CF Workers não expõe isso (validação falha com
+`Worker is not defined`).
 
-A API é compatível: o firmware já existente continua chamando
-`https://music-proxy.<seu-account>.workers.dev/?q=ramones+blitzkrieg` e
-recebe MP3. As headers `X-Title`, `X-Artist`, `X-Duration` continuam.
+Pra reencodar de fato precisaria de **CF Containers** (ffmpeg nativo,
+em GA mas alguns accounts ainda em waitlist) ou de um microsserviço
+externo (Render/Fly.io) chamado pelo Worker.
 
-## Pré-requisitos
+## O que ESTE worker faz
 
-- Conta Cloudflare Workers **Paid** ($5/mês). O free tier (10 ms CPU)
-  estoura no transcode (~10 s de CPU por música).
-- `node` 20+ e `npm` na máquina de deploy.
-- `wrangler` CLI (instala via `npm install`).
+| Recurso | Comportamento |
+|---|---|
+| `?q=<query>` | Busca no Deezer, devolve preview MP3 |
+| `?max_kb=<N>` | Trunca o MP3 nos primeiros N KB (encurta download) |
+| Cache R2 | Música já buscada → 2ª request em ~10 ms |
+| Headers | `X-Title`, `X-Artist`, `X-Duration`, `X-Cache` |
+
+## Fluxo
+
+```
+ESP32 ──HTTPS──> Worker
+                    │
+                    ├─ R2 hit? ──> serve direto (~10 ms)
+                    │
+                    └─ miss ──> Deezer API ──> preview MP3 ──> R2.put + serve
+```
 
 ## Deploy
 
 ```bash
-cd worker-music-proxy
+cd musicmarvin
 npm install
-
-# Login (abre browser pra OAuth)
 npx wrangler login
-
-# Cria o bucket R2 (uma vez só por conta)
-npm run r2:create
-
-# Deploy
-npm run deploy
+npx wrangler r2 bucket create music-cache   # uma vez só
+npx wrangler deploy
 ```
 
-A URL gerada vai aparecer no fim:
-`https://music-proxy.<seu-account>.workers.dev`
-
-Atualize o firmware (`main/boards/zzpet-s3/music_streamer.cc:RegisterMcpTools`
-e `zzpet_web_server.cc:HandlePlayProxy`) pra apontar pra ela se mudou de
-URL — se vc reusar o mesmo nome do worker antigo (`music-proxy`), nada
-muda no firmware.
+URL gerada: `https://music-cache.<seu-account>.workers.dev`
 
 ## Testes
 
-### CPU + tamanho
+### Sanity check
 
-Primeira chamada (cold cache):
 ```bash
-curl -s -o /tmp/light.mp3 -D - \
-  "https://music-proxy.<seu-account>.workers.dev/?q=ramones+blitzkrieg" \
+curl -sD - -o /tmp/song.mp3 \
+  "https://music-cache.<seu-account>.workers.dev/?q=ramones+blitzkrieg" \
   | grep -E 'X-Cache|X-Title|X-Artist|Content-Length'
-ls -la /tmp/light.mp3
-ffprobe /tmp/light.mp3 2>&1 | grep -E 'Audio|Duration'
+
+ls -la /tmp/song.mp3
+ffprobe /tmp/song.mp3 2>&1 | grep -E 'Audio|Duration'
+# esperado: Audio: mp3, 44100 Hz, stereo, 128 kb/s
+#           Duration: ~30s
+#           ~480 KB
 ```
 
-Esperado:
-```
-X-Cache: MISS
-X-Title: Blitzkrieg Bop
-X-Artist: Ramones
-~240 KB de arquivo
-Audio: mp3, 22050 Hz, mono, fltp, 64 kb/s
-Duration: ~30s
-```
+### Cache hit
 
-Segunda chamada (cache hit):
 ```bash
-curl -sI "https://music-proxy.<seu-account>.workers.dev/?q=ramones+blitzkrieg" | grep X-Cache
-# → X-Cache: HIT  (TTFB ~10 ms)
+curl -sI "https://music-cache.<seu-account>.workers.dev/?q=ramones+blitzkrieg" \
+  | grep X-Cache
+# 1ª: X-Cache: MISS  (~3 s)
+# 2ª: X-Cache: HIT   (~50 ms)
 ```
 
 ### Truncamento
 
 ```bash
 curl -s -o /tmp/short.mp3 \
-  "https://music-proxy.<seu-account>.workers.dev/?q=ramones+blitzkrieg&max_kb=80"
-ls -la /tmp/short.mp3   # ~80 KB → ~10 s de áudio
+  "https://music-cache.<seu-account>.workers.dev/?q=ramones&max_kb=120"
+ls -la /tmp/short.mp3   # ~120 KB → ~7.5 s de música
 ```
 
-### End-to-end no firmware
+## Custos
 
-```bash
-curl -s "http://doguia.local/doguia/play_proxy?q=ramones+blitzkrieg"
-```
+| Recurso | Free tier | Suficiente pra |
+|---|---|---|
+| Workers requests | 100 k/dia | uso doméstico |
+| R2 storage | 10 GB | ~20 mil músicas a 480 KB |
+| R2 Class A (PUT) | 1 M ops/mês | 33 mil músicas novas/mês |
+| R2 Class B (GET) | 10 M ops/mês | 333 mil hits/mês |
 
-Esperado nos logs serial (ESP_LOGW):
-```
-W (xxxx) MusicStreamer: stream 22050 Hz, 1 ch, 16 bps        ← era 44100/2
-W (xxxx) MusicStreamer: prebuffered 13230 samples (1200ms) in <1500 ms
-W (xxxx) MusicStreamer: dl request 1: HTTP 200, +240000 bytes, total 240000 complete
-W (xxxx) MusicStreamer: stream done — pushed N frames
-```
-
-## Local dev
-
-```bash
-npm run dev
-# Abre wrangler dev em http://localhost:8787
-# Curl ali pra testar sem fazer deploy:
-curl -s -o /tmp/dev.mp3 "http://localhost:8787/?q=ramones"
-```
-
-`wrangler dev` por padrão usa **R2 local** (filesystem do dev), não toca
-no bucket de produção. Pra usar o bucket real durante dev:
-```bash
-npx wrangler dev --remote
-```
+**Total**: $0 fixo. Diferente da versão com transcode (que exigia
+Workers Paid $5/mês), este worker fica todo no free tier.
 
 ## Manutenção
 
-### Listar / limpar cache
-
 ```bash
-npm run r2:list                      # lista chaves
+npm run r2:list                                  # lista chaves
 npx wrangler r2 object delete music-cache tracks/<sha1>.mp3   # deleta uma
-npm run r2:purge                     # apaga tudo + recria bucket
+npm run r2:purge                                 # apaga tudo + recria
+npm run tail                                     # logs ao vivo
 ```
 
-### Logs em produção
+## Lifecycle (TTL automático no R2)
 
-```bash
-npm run tail
-# Stream em tempo real dos logs (console.log/console.error do worker)
+Pra evitar acumular músicas pra sempre, configure no painel:
+
+1. R2 → music-cache → **Settings** → **Object Lifecycle Rules**
+2. **Add rule**:
+   - Name: `expire-old-tracks`
+   - Apply to: `tracks/`
+   - Action: Delete after **90 days**
+3. Save
+
+Após o TTL, a música é deletada automaticamente. Próxima request por
+ela faz cache miss e renova.
+
+## Compatibilidade com firmware
+
+A API é idêntica à do worker antigo — o ESP32 continua chamando:
+
+```
+https://music-cache.<seu-account>.workers.dev/?q=<query>
 ```
 
-## Como funciona internamente
+E recebe MP3 com headers `X-Title`/`X-Artist`/`X-Duration`. Nenhuma
+mudança no firmware é necessária.
 
-1. Recebe `?q=<query>`.
-2. Calcula `cacheKey = sha1(q.trim().toLowerCase())`.
-3. Tenta `MUSIC.get(cacheKey)` no R2. Se hit → serve direto (10 ms).
-4. Cache miss:
-   - `GET https://api.deezer.com/search?q=...&limit=1` → preview URL +
-     metadata (title/artist/duration).
-   - `GET <preview URL>` → MP3 stereo 128 kbps 44100 Hz inteiro (~480 KB).
-   - `mpg123-decoder` (WASM) decodifica → Float32 PCM stereo.
-   - Downmix L+R/2 + decimate 2:1 → Int16 mono 22050 Hz.
-   - `lamejs` encoda → MP3 mono 64 kbps 22050 Hz (~240 KB).
-   - `ctx.waitUntil(MUSIC.put(...))` salva em R2 sem bloquear resposta.
-5. Devolve com headers `X-Title`, `X-Artist`, `X-Duration`, `X-Cache`.
+## Pendências (próximos passos opcionais)
 
-## Custos esperados (uso doméstico, 1 robô)
-
-| Item | Quota free | Custo extra |
-|---|---|---|
-| Workers Paid | 10 M req/mês incl. | $0 |
-| R2 storage | 10 GB grátis (~40 mil músicas) | $0 |
-| R2 Class A (PUT) | 1 M ops/mês grátis | $0 |
-| R2 Class B (GET) | 10 M ops/mês grátis | $0 |
-| **Total fixo** | — | **$5/mês (Workers Paid)** |
-
-A partir do 2º hit por música, custo zero (R2 grátis).
-
-## Rollback
-
-Se o transcode der problema (artefato sonoro, OOM, CPU stall), volta
-pro worker antigo:
-
-```bash
-git checkout HEAD~1 worker.mjs   # se vc commitou em cima do antigo
-npm run deploy
-```
-
-Ou simplesmente re-deploya o `music-proxy.js` original — eles ocupam o
-mesmo namespace `name = "music-proxy"`.
-
-## Dúvidas frequentes
-
-**P: Por que não usar `Range` no upstream pra economizar download Deezer?**
-R: Pra decodificar MP3 inteiro a partir do offset 0 a gente PRECISA dos
-frames todos. Range com bytes parciais quebra o decoder.
-
-**P: Não dá pra fazer o transcode no Worker free tier?**
-R: Não. O encode lamejs sozinho já passa de 5s de CPU. Free é 10ms.
-
-**P: A qualidade de 64 kbps mono não fica ruim?**
-R: Pra preview vocal de 30s no alto-falante mono do robô a diferença é
-imperceptível. Se quiser melhor → muda para 96 kbps em `transcode()` no
-worker.mjs.
-
-**P: O R2 vai expirar essas músicas?**
-R: Não automaticamente. Precisa rodar `r2:purge` ou deletar manualmente.
-Pra TTL automático, configure [Object Lifecycle Rules](https://developers.cloudflare.com/r2/buckets/object-lifecycles/)
-no painel do R2.
+1. **Transcoding real** quando CF Containers estiver disponível na sua
+   conta — adicionar Dockerfile com ffmpeg, chamar via container
+   binding. Reduz arquivo de 480 KB → 240 KB.
+2. **Suporte a Jamendo** como fallback quando Deezer não acha a música
+   (firmware já tem `SearchJamendo` implementado).
+3. **Métricas** via `wrangler tail` ou Cloudflare Workers Analytics
+   pra entender quais músicas batem mais o cache.
