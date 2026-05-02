@@ -14,7 +14,7 @@
   },
   "dependencies": {
     "@breezystack/lamejs": "^1.2.7",
-    "mpg123-decoder": "^1.2.0"
+    "mpg123-decoder": "^1.0.3"
   },
   "devDependencies": {
     "wrangler": "^4.0.0"
