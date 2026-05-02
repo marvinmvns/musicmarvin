@@ -10,17 +10,12 @@ compatibility_flags = ["nodejs_compat"]
 # por request, acima dos 10 ms do free tier.
 # usage_model = "bundled"  # default no Paid; sem-CPU-limit
 
-# R2 cache — DESABILITADO por enquanto. Sem cache cada request paga ~10s
-# de CPU pra transcodar. Pra ativar:
-#   1. Habilita R2 no dashboard: dash.cloudflare.com → R2 → Enable
-#   2. Cria o bucket: npx wrangler r2 bucket create music-cache
-#      (ou no painel: R2 → Create bucket → name: music-cache)
-#   3. Descomenta o bloco abaixo
-#   4. Redeploy
-#
-# [[r2_buckets]]
-# binding = "MUSIC"
-# bucket_name = "music-cache"
+# R2 cache. Bucket precisa existir antes do deploy:
+#   npx wrangler r2 bucket create music-cache
+# ou painel: R2 → Create bucket → name: music-cache
+[[r2_buckets]]
+binding = "MUSIC"
+bucket_name = "music-cache"
 
 # Limites — sobe se vc tem músicas longas (preview Deezer é sempre 30 s,
 # então 50 s de CPU é folgado).
